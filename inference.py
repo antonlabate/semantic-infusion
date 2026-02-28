@@ -19,17 +19,18 @@ login(os.getenv("HF_KEY"))
 
 LANG = "galician"
 BASE_MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
-ADAPTER_CHECKPOINT = "438"
+
+# Checkpoint step number produced by continued_training.py — update this after each run
+CHECKPOINT_STEP = "438"
 
 # Model to load: the merged (base + AMR adapter) model, fine-tuned on Spider
 MERGED_MODEL_PATH = f"{LANG}-semantic-Mistral"
-ADAPTER_CHECKPOINT = f"results_{LANG}_mistral_7b_semantic_ft_on_spider-1-epoch/checkpoint-{ADAPTER_CHECKPOINT}"
+ADAPTER_CHECKPOINT = f"results_{LANG}_mistral_7b_semantic_ft_on_spider-1-epoch/checkpoint-{CHECKPOINT_STEP}"
 
 EVAL_DATASET_PATH = (
-    "training_data/spider_galician_and_guarani_translations_updated/"
+    "data/spider_galician_and_guarani_translations_updated/"
     "resdsql_dev_Guarani_and_Galician.json"
 )
-
 
 OUTPUT_SQL_PATH = f"answer_files_sql/semantic-text2sql-{LANG}-mistral.sql"
 
@@ -191,6 +192,7 @@ print(f"Inference completed in {time.time() - start_time:.2f} seconds.")
 # Save results
 # ---------------------------------------------------------------------------
 
+os.makedirs(os.path.dirname(OUTPUT_SQL_PATH), exist_ok=True)
 with open(OUTPUT_SQL_PATH, "w") as f:
     for row in sql_answers:
         f.write(row["sql_answer"] + "\n")
