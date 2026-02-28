@@ -1,152 +1,198 @@
-import datasets
-from datasets import load_dataset
-from peft import AutoPeftModelForCausalLM
-from transformers import AutoTokenizer
-import torch
+import os
 import time
-from transformers import (
-    AutoModelForCausalLM,
-   
-    BitsAndBytesConfig,
-    HfArgumentParser,
-    TrainingArguments,
-    pipeline,
-    logging,
-)
-from peft import LoraConfig, PeftModel
+from contextlib import nullcontext
+from functools import partial
+
+import torch
+from datasets import load_dataset
+from dotenv import load_dotenv
 from huggingface_hub import login
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-login('hf_KEY')
-model_name = "mistralai/Mistral-7B-Instruct-v0.3"#"ibm-granite/granite-3.0-8b-instruct"  """meta-llama/Llama-3.1-8B-Instruct"
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
-bnb_config = BitsAndBytesConfig(
-   load_in_4bit=True,
-   bnb_4bit_quant_type="nf4",
-   bnb_4bit_use_double_quant=False,
-   bnb_4bit_compute_dtype=torch.bfloat16
+load_dotenv()
+login(os.getenv("HF_KEY"))
+
+LANG = "galician"
+BASE_MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
+ADAPTER_CHECKPOINT = "438"
+
+# Model to load: the merged (base + AMR adapter) model, fine-tuned on Spider
+MERGED_MODEL_PATH = f"{LANG}-semantic-Mistral"
+ADAPTER_CHECKPOINT = f"results_{LANG}_mistral_7b_semantic_ft_on_spider-1-epoch/checkpoint-{ADAPTER_CHECKPOINT}"
+
+EVAL_DATASET_PATH = (
+    "training_data/spider_galician_and_guarani_translations_updated/"
+    "resdsql_dev_Guarani_and_Galician.json"
 )
 
-base_model = AutoModelForCausalLM.from_pretrained(model_name,
-  quantization_config=bnb_config,
-  device_map="auto",
-  trust_remote_code=True,
-  use_auth_token=True
+
+OUTPUT_SQL_PATH = f"answer_files_sql/semantic-text2sql-{LANG}-mistral.sql"
+
+MAX_SEQ_LENGTH = 1024
+MAX_NEW_TOKENS = 1024
+INFERENCE_BATCH_SIZE = 32
+
+SYSTEM_MESSAGE = (
+    f"You are a great software engineer and SQL expert. You are given a question in {LANG}. "
+    "Your task is, given the user question and schema of a database, generate ONLY the true SQL "
+    "answer to the question, enclosed within <sql> and </sql> tags. "
+    "However, before generating any code, make sure you deeply understand and capture the true "
+    "meaning of this phrase. Once you have understood the intent of the sentence, output the SQL answer. "
+    "You should pay attention to the following guidelines while generating your answer:\n"
+    "  - Pay attention to the relationships between the terms in the question and to the meaning "
+    "of the user request which they convey;\n"
+    "  - Your answer must query only the columns that are needed to answer the question, with the "
+    "appropriate operators. Be careful to not query for columns that do not exist in the schema;\n"
+    "  - Pay attention to which column is in which table and use the proper columns for joins;\n"
+    "  - Provide as an answer ONLY the SQL query that correctly answers the question, within the "
+    "<sql> and </sql> tags without explanations or notes."
 )
 
-type_info = "syntax"
-model = PeftModel.from_pretrained(base_model, f"./mistral-7b-guarani-gen-{type_info}-assistant_comp_only/")
-tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side = "left")
+# ---------------------------------------------------------------------------
+# Model and tokenizer
+# ---------------------------------------------------------------------------
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    MERGED_MODEL_PATH,
+    device_map="auto",
+    token=True,
+)
+model = PeftModel.from_pretrained(base_model, ADAPTER_CHECKPOINT)
+model.eval()
+model.requires_grad_(False)
+
+tokenizer = AutoTokenizer.from_pretrained(
+    BASE_MODEL_ID,
+    max_length=MAX_SEQ_LENGTH,
+    padding="max_length",
+    padding_side="left",
+    truncation=True,
+)
 tokenizer.pad_token = tokenizer.unk_token
+tokenizer.pad_token_id = tokenizer.unk_token_id
 
-#load test set
-dataset_name = f"data/resdsql_dev_grnspider_llama_{type_info}.json" #resdsql_dev_ayr_Latnspider_llama.json
-dataset = load_dataset("json", data_files = dataset_name,split="train")
-prompts = []
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
 
-def create_prompt(example):
-  #bos_token = "<s>"
-  original_system_message = "Below is an instruction that describes a task. Write a response that appropriately completes the request."
-  system_message = """You are a great software engineer and SQL expert. Your task is, given the user question and schema of a database, generate ONLY the true SQL answer to the question. 
-    You should pay attention to the following guidelines while generating your answer:
-      - Your answer must query only the columns that are needed to answer the question, with the appropriate operators. Be careful to not query for columns that do not exist in the schema. 
-      - Pay attention to which column is in which table and use the proper columns for joins. 
-      - Provide as an answer ONLY the true SQL answer without explanations or notes."""
-  schema = example['input_sequence'].split("CREATE",1)[1]
-  try:
-        foreign_keys= schema.split("|",1)[1].replace("|",";")
-        schema = schema.split("|",1)[0]
-  except:
-            foreign_keys = ""
-  
-  question = example['input_sequence'].split("CREATE",1)[0].split("[row]", 1)[0]
-  phrase_structure = example['input_sequence'].split("CREATE",1)[0].split("[row]", 1)[1]
-  answer = example['output_sequence'].split("|",1)[1]
+dataset_eval = load_dataset("json", data_files=EVAL_DATASET_PATH, split="train")
 
-  #q_user = f"""### Question: {question} \n ### Schema: CREATE  {schema} \n ### Foreign keys relations: {foreign_keys}\n\n"""
-  q_user = f"""Schema: CREATE  {schema} \nForeign keys relations: {foreign_keys} \n\nQuestion: {question}\n"""
-  
-  #Uncomment the following (next) line for training with syntax or semantics appended to input question, instead of making the model generate it
-  #q_user = f"""### Question: {example['input_sequence'].split("CREATE",1)[0]} \n ### Schema: CREATE {schema} \n ### Foreign keys relations: {foreign_keys} \n\n"""
-  
-  q_assistant = f"Syntactic structure: [row] "#{phrase_structure}\nTrue SQL answer: "
+# ---------------------------------------------------------------------------
+# Prompt formatting (inference — no assistant turn)
+# ---------------------------------------------------------------------------
 
-  messages = [
-        {"role": "system", "content":system_message},
-        {"role":"user", "content":q_user}
-       
-      ]
+def format_for_inference(example):
+    """Build the chat-template prompt for a single Spider eval example.
 
-  prompt = tokenizer.apply_chat_template(
-        messages, 
-        tokenize=False, 
-        add_generation_prompt=True
-	    )
-        
-  prompt = prompt+q_assistant
-  
-  example["question"] =  prompt 
+    Parses the '{LANG}_prompt' field (format: "{question}CREATE{schema}|{fk_relations}|...")
+    and produces a prompt ending with [/INST] so the model generates the SQL answer.
+    """
+    raw_prompt = example[f"{LANG}_prompt"]
 
-  return (example)
+    # Split question from schema block (everything after the first "CREATE")
+    question, schema_after_create = raw_prompt.split("CREATE", 1)
 
-#map test set  
-test = dataset.map(create_prompt) 
-print(len(test))       
+    # Extract optional foreign-key relations encoded after the first "|"
+    if "|" in schema_after_create:
+        schema_tables, fk_block = schema_after_create.split("|", 1)
+        foreign_keys = fk_block.replace("|", ";")
+    else:
+        schema_tables = schema_after_create
+        foreign_keys = ""
 
-def generate_response(prompt, model):
-  encoded_input = tokenizer(prompt,  return_tensors="pt", add_special_tokens=False)
-  model_inputs = encoded_input.to('cuda')
+    user_content = (
+        f"Schema: CREATE {schema_tables}\n"
+        f"Foreign keys relations: {foreign_keys}\n\n"
+        f"Question: {question}\n"
+    )
 
-  generated_ids = model.generate(**model_inputs,
-                                 max_new_tokens=150,
-                                 do_sample=True,
-                                 #repetition_penalty = 1.0,
-                                 temperature = 0.3,
-                                 num_beams = 3,
-                                 #no_repeat_ngram_size = 3,
-                                 pad_token_id=tokenizer.eos_token_id)
+    messages = [
+        {"role": "system", "content": SYSTEM_MESSAGE},
+        {"role": "user", "content": user_content},
+    ]
 
-  decoded_output = tokenizer.batch_decode(generated_ids) #.detach().cpu().numpy())
-
-  return decoded_output[0]
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,  # appends [/INST] so the model generates the answer
+    )
+    return {"messages": prompt}
 
 
-tam = len(dataset)
+dataset_eval = dataset_eval.map(format_for_inference, desc="Formatting dataset")
 
-prompts = test["question"]
-    
-def get_sql_no_hal(sample):
-    prompt = sample["question"]
-    #print(prompt)
-    gen = generate_response(prompt, model)
-    
-    print("Total")
-    
-    print(gen)
-    try:
-        gen = gen.split("True SQL answer: ", 1)[1].strip()
-    
-    except:
+# ---------------------------------------------------------------------------
+# Batch inference
+# ---------------------------------------------------------------------------
 
-        gen= ""
-    
+@torch.inference_mode()
+def generate_sql_batch(examples, model):
+    """Run batched inference and extract SQL answers from the model output.
 
-    try:
-      gen = gen.replace("</s>", "")
-    except:
-      gen = gen
-    
-    
-    
-    sample["sql"] = gen
-    
-    return sample
-    
-sql_answers = test.map(get_sql_no_hal)
-sql_answers.save_to_disk(f"answers/guarani_model_generating_{type_info}_assistant_no_ind_comp_only")
+    Returns a dict with key "sql_answer" for each example in the batch.
+    Falls back to "invalid sql" when the model produces no <sql> content.
+    """
+    tokenized_inputs = tokenizer(
+        examples["messages"],
+        add_special_tokens=False,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=MAX_SEQ_LENGTH,
+    ).to(model.device)
 
-with open(f"pred_guarani_with_{type_info}_assistant_no_ind_comp_only.sql",'w') as file:
-  for k in range(len(sql_answers["sql"])):
-    file.write(sql_answers[k]["sql"])
-    file.write("\n")
+    # Use autocast when the model runs in a reduced-precision dtype
+    ctx = (
+        torch.autocast(device_type=model.device.type, dtype=torch.bfloat16)
+        if model.dtype in (torch.float16, torch.bfloat16)
+        else nullcontext()
+    )
+
+    with ctx:
+        generation_output = model.generate(
+            **tokenized_inputs,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.unk_token_id,
+            do_sample=False,
+            max_new_tokens=MAX_NEW_TOKENS,
+            use_cache=True,
+        )
+
+    raw_outputs = tokenizer.batch_decode(generation_output, skip_special_tokens=False)
+
+    sql_answers = []
+    for raw in raw_outputs:
+        # Trim at the end-of-sequence token, then extract content between <sql> tags
+        raw = raw.split("</s>", 1)[0]
+        sql = raw.split("<sql>")[-1].replace("</sql>", "").replace("</s>", "")
+        sql_answers.append(sql if sql else "invalid sql")
+
+    return {"sql_answer": sql_answers}
 
 
+print("Starting batch inference...")
+start_time = time.time()
+
+sql_answers = dataset_eval.map(
+    partial(generate_sql_batch, model=model),
+    batched=True,
+    batch_size=INFERENCE_BATCH_SIZE,
+    desc="Generating SQL answers",
+)
+
+print(f"Inference completed in {time.time() - start_time:.2f} seconds.")
+
+# ---------------------------------------------------------------------------
+# Save results
+# ---------------------------------------------------------------------------
+
+with open(OUTPUT_SQL_PATH, "w") as f:
+    for row in sql_answers:
+        f.write(row["sql_answer"] + "\n")
+
+print("Results saved successfully.")
