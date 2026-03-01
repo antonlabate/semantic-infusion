@@ -2,7 +2,7 @@ import os
 
 import torch
 import pandas as pd
-from datasets import load_from_disk
+from datasets import load_dataset
 from dotenv import load_dotenv
 from huggingface_hub import login
 from peft import LoraConfig
@@ -17,7 +17,7 @@ load_dotenv()
 login(os.getenv("HF_KEY"))
 
 MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
-DATASET_PATH = "training_data/synthetic_text2sql_AMR_simple_SQL_glg_and_grn"
+DATASET_PATH = "antonlabate/synthetic-simple-text-to-AMR-SQL-pt-glg-grn-cym"
 LANG = "galician"
 
 OUTPUT_DIR = f"./results_{LANG}_mistral_7b_semantic_aware"
@@ -90,7 +90,7 @@ if torch.cuda.device_count() > 1:
 # Dataset
 # ---------------------------------------------------------------------------
 
-dataset = load_from_disk(DATASET_PATH).train_test_split(
+dataset = load_dataset(DATASET_PATH, split="train").train_test_split(
     test_size=TEST_SPLIT_SIZE,
     seed=RANDOM_SEED,
 )

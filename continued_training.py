@@ -25,8 +25,8 @@ PREV_ADAPTER_PATH = f"results_{LANG}_mistral_7b_semantic_aware/checkpoint-{ADAPT
 MERGED_MODEL_EXPORT_NAME = f"{LANG}-semantic-Mistral"
 
 # Spider dataset (Galician + Guarani translations)
-TRAIN_DATASET_PATH = "training_data/spider_galician_and_guarani_translations_updated/resdsql_train_Guarani_and_Galician.json"
-EVAL_DATASET_PATH = "training_data/spider_galician_and_guarani_translations_updated/resdsql_dev_Guarani_and_Galician.json"
+DATASET_PATH = "antonlabate/spider-glg-grn"
+
 
 OUTPUT_DIR = f"./results_{LANG}_mistral_7b_ft_on_spider-1-epoch"
 ADAPTER_NAME = f"mistral-7b-{LANG}-ft-on-spider-1-epoch"
@@ -113,9 +113,8 @@ if torch.cuda.device_count() > 1:
 # Dataset (Spider, Galician + Guarani translations)
 # ---------------------------------------------------------------------------
 
-dataset_train = load_dataset("json", data_files=TRAIN_DATASET_PATH, split="train")
-dataset_eval = load_dataset("json", data_files=EVAL_DATASET_PATH, split="train")
-print(f"Train: {len(dataset_train)} examples | Eval: {len(dataset_eval)} examples")
+dataset = load_dataset(DATASET_PATH)
+print(f"Train: {len(dataset["train"])} examples | Eval: {len(dataset["test"])} examples")
 
 # ---------------------------------------------------------------------------
 # Prompt formatting
@@ -214,8 +213,8 @@ training_args = SFTConfig(
 
 trainer = SFTTrainer(
     model=model,
-    train_dataset=dataset_train,
-    eval_dataset=dataset_eval,
+    train_dataset=dataset["train"],
+    eval_dataset=dataset["test"],
     peft_config=peft_config,
     tokenizer=tokenizer,
     formatting_func=build_spider_sql_prompts,
