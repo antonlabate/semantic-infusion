@@ -13,17 +13,17 @@ The approach is evaluated on the **Spider** Text-to-SQL benchmark using Galician
 ## The Three-Step Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────────────────----┐
+┌─────────────────────────────────────────────────────────────────────────────┐
 │  Step 1  │  train_general.py                                                │
 │          │  Fine-tune a LoRA adapter that parses the AMR semantic           │
 │          │  structure of Galician / Guarani input sentences.                │
 │          │                                                                  │
 │          │  Input:  sentence in Galician / Guarani                          │
 │          │  Output: AMR tree  →  <semantics> (a / amr-tree ...) </semantics>│
-└──────────────────────────────┬──────────────────────────────────────────----┘
+└──────────────────────────────┬──────────────────────────────────────────────┘
                                │  merge AMR adapter into Mistral-7B
                                ▼
-┌────────────────────────────────────────────────────────────────────────----─┐
+┌─────────────────────────────────────────────────────────────────────────────┐
 │  Step 2  │  continued_training.py                                           │
 │          │  1. Merge the Step 1 adapter → "{LANG}-semantic-Mistral"         │
 │          │     (a Mistral-7B model now semantically aware of the            │
@@ -33,14 +33,14 @@ The approach is evaluated on the **Spider** Text-to-SQL benchmark using Galician
 │          │                                                                  │
 │          │  Input:  Galician / Guarani question + DB schema                 │
 │          │  Output: SQL query  →  <sql> SELECT ... </sql>                   │
-└──────────────────────────────┬──────────────────────────────────────────----┘
+└──────────────────────────────┬──────────────────────────────────────────────┘
                                │  load merged model + SQL adapter
                                ▼
-┌────────────────────────────────────────────────────────────────────────----─┐
+┌─────────────────────────────────────────────────────────────────────────────┐
 │  Step 3  │  inference.py                                                    │
 │          │  Batch inference on the Spider dev set.                          │
 │          │  Writes one predicted SQL query per line to a .sql file.         │
-└─────────────────────────────────────────────────────────────────────────----┘
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Why AMR?
